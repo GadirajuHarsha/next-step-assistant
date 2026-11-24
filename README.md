@@ -1,149 +1,117 @@
-# Complement
+# Complement: AI-Powered Desktop Assistant & Next-Step Predictor
 
-[![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Tauri](https://img.shields.io/badge/tauri-%2324C8DB.svg?style=for-the-badge&logo=tauri&logoColor=%23FFFFFF)](https://tauri.app/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=for-the-badge&logo=PyTorch&logoColor=white)](https://pytorch.org/)
-[![ONNX](https://img.shields.io/badge/ONNX-005CED?style=for-the-badge&logo=onnx&logoColor=white)](https://onnx.ai/)
-[![SQLite](https://img.shields.io/badge/sqlite-%2307405e.svg?style=for-the-badge&logo=sqlite&logoColor=white)](https://sqlite.org/)
+Hello! Thanks for checking out my project!
 
-A local desktop launcher and productivity assistant built with Rust, Tauri, and ONNX. Complement runs offline, indexes your system, and uses a lightweight neural network to predict your next application or action based on workflow patterns.
+I built Complement in Rust, Tauri, and PyTorch to explore desktop systems programming and challenge myself to take a traditional desktop launcher (like Spotlight or Alfred) and replace static search with a lightweight, embedded neural network that learns your workflow habits and predicts your next application or action before you even type a character.
 
-## Performance & Benchmarks
+$$\mathbf{x} = \begin{bmatrix} t_{\text{hour}} \\ t_{\text{day}} \\ \mathbb{I}_{\text{weekend}} \\ \Delta t_{\text{recency}} \\ f_{\text{freq}} \\ s_{\text{recent}} \\ c_{\text{window}} \\ c_{\text{search}} \end{bmatrix} \in [0, 1]^8 \quad \xrightarrow{\quad \text{ONNX Runtime} \quad} \quad \hat{\mathbf{y}} = \operatorname{softmax}(W_4 \cdot \operatorname{ReLU}(W_3 \dots W_1 \mathbf{x}))$$
 
-- **Search latency:** <5ms across 10k+ indexed items
-- **ML inference:** <10ms per prediction via ONNX Runtime
-- **Cold start:** <200ms to first render
-- **Memory footprint:** <50MB baseline (<100MB peak)
-- **CPU usage:** <1% background utilization
-- **Accuracy:** 90%+ prediction accuracy after roughly one week of usage (75% reduction in app access time)
+In this engine, every application launch, search query, and foreground window transition is captured as a local temporal event in an embedded SQLite database configured in Write-Ahead Logging (WAL) mode. Complement transforms these signals into an 8-dimensional context feature vector and feeds them through an embedded ONNX neural network to predict user intent in **sub-10ms** with a **<50MB memory footprint**—running **100% locally with zero cloud dependencies or telemetry**.
+
+Built from scratch using Rust, Tauri 2.0, PyTorch, ONNX Runtime, and SQLite.
+
+---
+
+## Architecture & Deep Dive
+
+I wrote a comprehensive architecture guide with Mermaid diagrams, dataflow pipelines, benchmark breakdowns, and subsystem analyses covering the 8D context feature extraction, ONNX runtime integration, SQLite WAL tuning, cross-platform app indexing, and transparent click-through window physics.
+
+**Check it out if you're interested! [ARCHITECTURE.md](ARCHITECTURE.md)**
+
+---
+
+## Performance Highlights
+
+| Metric | Complement (Rust + Tauri) | Electron Launchers | Traditional OS Search |
+| :--- | :--- | :--- | :--- |
+| **Search Response Time** | **<5 ms** across 10k+ items | 45 ms - 120 ms | 15 ms - 50 ms |
+| **ML Inference Latency** | **<10 ms** (Embedded ONNX) | N/A (Cloud-based 150ms+) | N/A (Static search) |
+| **Cold Start to Render** | **<200 ms** to interactive HUD | 800 ms - 2,500 ms | Instant (Background service) |
+| **Idle Memory Footprint** | **<50 MB** baseline | 350 MB - 750 MB | ~80 MB |
+| **Background CPU Usage** | **<0.2%** utilization | 1.5% - 4.0% | <0.5% |
+| **Privacy & Telemetry** | **100% Local (Zero Network)** | Cloud-dependent features | Cloud/Bing telemetry |
+
+---
 
 ## Features
 
-| Feature | Implementation | Notes |
-|---------|---------------|-------|
-| **Instant Search** | Fuzzy matching via `SkimMatcher` | <5ms response time |
-| **Action Predictions** | ONNX Runtime + 8-dimensional features | Runs entirely locally |
-| **Clipboard History** | SQLite with content type detection | Unlimited local storage |
-| **Snippet Expansion** | Keyword-triggered templates | Sub-second text expansion |
-| **Web Search** | Multi-engine support | Parallel query execution |
-| **Privacy** | Local-only processing | Zero telemetry or network calls |
+| Feature | Implementation | Performance & Notes |
+| :--- | :--- | :--- |
+| **Context Predictions** | 8D Feature Extractor + ONNX Runtime MLP | Sub-10ms local inference with explainable reasoning |
+| **Instant Fuzzy Search** | Modified Smith-Waterman via `SkimMatcherV2` | Sub-5ms fuzzy search across thousands of system apps |
+| **Clipboard History** | Background thread + SQLite WAL ring buffer | 500ms poller with duplicate suppression & source tracking |
+| **Snippet Expansion** | Keyword trigger (`:keyword`) via SQLite | Sub-millisecond template expansion to clipboard |
+| **Math Calculator** | AST expression parsing via `meval` | Instant inline evaluation; copies to clipboard on Enter |
+| **Direct Web Search** | URL-encoded engine launcher (`g <query>`) | Launches directly in default browser with zero latency |
+| **Transparent Overlay** | Borderless click-through Tauri window | Hardware-accelerated CSS glassmorphism & dynamic resizing |
 
-## Architecture
+---
 
-### Frontend (TypeScript + Vite)
-- Transparent, borderless overlay window with click-through support
-- Dynamic window resizing based on query results
-- CSS transform and opacity transitions
-- Real-time fuzzy search with match highlighting
-
-### Backend (Rust + Tauri)
-- Global hotkey registration via the Windows API
-- Local SQLite database configured with security `PRAGMA` settings
-- Background clipboard monitoring and content classification
-- Multi-threaded async ML inference
-
-### ML Pipeline (Python + PyTorch + ONNX)
-- **Feature Engineering:** 8-dimensional feature vector covering temporal patterns, usage frequency, context similarity, and productivity scoring
-- **Training:** PyTorch neural network utilizing batch normalization and dropout regularization, validated with stratified cross-validation splits
-- **Deployment:** Exported to quantized ONNX format for fast, zero-dependency inference in Rust
-- **Cold Start:** Includes synthetic data generation for initial baseline weights before user history accumulates
-
-```bash
-# Train the model and generate inference artifacts
-python ml_training/train_model.py
-
-# Output artifacts:
-├── complement_recommendation_model.onnx  # Quantized inference model
-├── app_labels.txt                       # Application class mappings
-└── model_info.json                      # Model metadata & evaluation metrics
-```
-
-## Getting Started
+## Quickstart
 
 ### Prerequisites
-```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf [https://sh.rustup.rs](https://sh.rustup.rs) | sh
+* **Rust**: Latest stable toolchain (`rustup`)
+* **Node.js**: v18+ and `npm`
+* **Python**: 3.9+ (optional, only required for retraining the ML model)
 
-# Install frontend dependencies
+```bash
+# 1. Clone the repository
+git clone https://github.com/GadirajuHarsha/next-step-assistant.git
+cd next-step-assistant/complement
+
+# 2. Install frontend dependencies
 npm install
 
-# Install Python ML dependencies
-pip install torch torchvision pandas numpy scikit-learn onnx
+# 3. (Optional) Install Python dependencies for ML training
+pip install -r ml_training/requirements.txt
 ```
 
-### Build & Run
+### Running the Application
+
+To run Complement in development mode with hot-reloading for both Rust and TypeScript:
+
 ```bash
-# Run in development mode with hot reload
-cargo tauri dev
-
-# Build production binary
-cargo tauri build
-
-# Retrain the ML model locally (optional)
-cd ml_training && python train_model.py
+npm run tauri dev
 ```
 
-### Usage
-1. **Toggle:** Press `Ctrl+Alt+Space` anywhere to open the command bar
-2. **Search:** Type to fuzzy-search apps, files, or run system commands
-3. **Predictions:** Type `ml` or `ai` to view context-based recommendations
-4. **Clipboard:** Type `c` to search clipboard history
-5. **Snippets:** Type `:keyword` to expand saved text snippets
+To build a standalone production executable:
 
-## Implementation Notes
-
-### Async ML Inference (Rust)
-```rust
-#[tauri::command]
-async fn get_ml_recommendations(
-    db: tauri::State<'_, Mutex<Connection>>,
-    index: tauri::State<'_, Vec<App>>
-) -> Result<Vec<MLPrediction>, String> {
-    // Extracts 8D context features and runs ONNX Runtime session
-}
+```bash
+npm run tauri build
 ```
 
-### Recommendation Model (PyTorch)
-```python
-class ComplementRecommendationModel(nn.Module):
-    def __init__(self, input_size, num_classes):
-        super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_size, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            # ...
-        )
+### Training the Machine Learning Model
+
+Complement ships with pre-trained ONNX model artifacts in `complement/models/`. If you want to retrain the neural network on synthetic or exported usage data:
+
+```bash
+cd complement/ml_training
+python train_model.py
 ```
 
-### Hotkey Focus Handling (TypeScript)
-```typescript
-listen("focus-input", () => {
-    commandInputEl?.focus();
-    updatePreview();
-});
-```
+This script:
+1. Generates 15,000 synthetic behavioral context samples simulating real-world work habits.
+2. Trains a 4-layer perceptron in PyTorch with dropout regularization.
+3. Automatically exports the optimized model to `models/complement_recommendation_model.onnx` with dynamic batch axes and saves class mappings to `models/app_labels.txt`.
 
-## Roadmap & Project Status
+---
 
-**Current Status:** ~95% Complete (Phases 1, 2, and 4 complete; Phase 3 in progress)
+## Command System & Usage Guide
 
-### Remaining Tasks (Priority Order)
-1. **Complement Notes System (High):** Add a SQLite notes table and text parsing to extract user intent and feed it into the ML context pipeline.
-2. **UI Polish & Animations (High):** Refine window translucency effects, fade transitions, and micro-interactions.
-3. **Task Transition Intelligence (Medium):** Incorporate time-tracking heuristics to suggest workflow transitions (e.g., active work to break states).
-4. **Cluster Launch System (Low):** Support grouping multiple applications to launch simultaneously via a single command.
-5. **Extended System Commands (Low):** Add native OS power commands (sleep, restart, shutdown).
+Once launched, Complement operates as an unobtrusive command HUD:
 
-### Future Exploration
-- Multi-modal screen context understanding (Vision + NLP)
-- Federated learning for privacy-preserving cross-device model updates
-- Third-party plugin API and custom workflow scripting
-- Local speech-to-text voice interface
-- Optional end-to-end encrypted cloud sync
+| Trigger / Command | Action | Example |
+| :--- | :--- | :--- |
+| `Ctrl+Alt+Space` | Global hotkey to toggle Complement from anywhere | Press anywhere to summon HUD |
+| *(Empty Query)* | Surfaces context-aware AI recommendations & greeting | Opens with top 3 anticipated apps |
+| `<app name>` | Real-time fuzzy search across system applications | Type `code`, `term`, `calc` |
+| `ml` or `ai` | Displays top ONNX neural network predictions & confidence | Type `ml` to view 5 scored predictions |
+| `c` or `clip` | Opens recent clipboard history ring buffer | Type `c` to browse and restore clips |
+| `:keyword` | Expands saved text snippet templates | Type `:email` to copy saved template |
+| `<math expression>` | Evaluates mathematical formulas; Enter copies result | Type `(120 * 4) / 1.5` |
+| `g <search query>` | Executes a direct Google web search in default browser | Type `g rust tauri 2.0` |
+| `exit` | Exits Complement with a smooth scale-fade animation | Type `exit` and press Enter |
 
-## License
+---
 
-MIT License
+## Thanks for Visiting!

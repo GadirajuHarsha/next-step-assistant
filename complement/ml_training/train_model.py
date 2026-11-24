@@ -48,8 +48,10 @@ class ComplementRecommendationModel(nn.Module):
         x = self.relu(self.fc2(x))
         x = self.dropout(x)
         x = self.relu(self.fc3(x))
-        x = self.fc4(x)
-        return self.softmax(x)
+        logits = self.fc4(x)
+        if self.training:
+            return logits  # Return raw logits for PyTorch CrossEntropyLoss
+        return self.softmax(logits)  # Return normalized probabilities during evaluation and ONNX export
 
 def generate_synthetic_training_data(num_samples=10000):
     """
@@ -201,6 +203,9 @@ def train_model(df, apps):
 def export_to_onnx(model, apps):
     """Export the trained model to ONNX format."""
     print("📦 Exporting model to ONNX format...")
+    
+    # Ensure model is in eval mode so softmax is applied and dropout is disabled
+    model.eval()
     
     # Create dummy input for ONNX export
     dummy_input = torch.randn(1, 8)  # Batch size 1, 8 features

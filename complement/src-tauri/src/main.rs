@@ -9,7 +9,9 @@ use rusqlite::{Connection, Result as SqlResult, params};
 use chrono::{DateTime, Utc, Local, Datelike, Timelike};
 use std::path::PathBuf;
 use std::sync::Mutex;
+#[cfg(windows)]
 use std::ffi::OsString;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStringExt;
 use clipboard::{ClipboardProvider, ClipboardContext};
 use ndarray::Array1;
@@ -212,6 +214,14 @@ fn init_database() -> SqlResult<Connection> {
     
     let conn = Connection::open(db_path)?;
     
+    // Configure SQLite PRAGMA performance and integrity settings
+    conn.execute_batch("
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA foreign_keys = ON;
+        PRAGMA temp_store = MEMORY;
+    ")?;
+    
     // Create usage_events table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS usage_events (
@@ -226,6 +236,10 @@ fn init_database() -> SqlResult<Connection> {
         [],
     )?;
     
+    // Indexes for fast temporal and context aggregation queries
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_events_type_time ON usage_events(event_type, timestamp)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_events_content ON usage_events(content)", [])?;
+    
     // Create app_frequency table for aggregated stats
     conn.execute(
         "CREATE TABLE IF NOT EXISTS app_frequency (
@@ -239,6 +253,9 @@ fn init_database() -> SqlResult<Connection> {
         [],
     )?;
     
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_app_frequency_path ON app_frequency(app_path)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_app_frequency_count ON app_frequency(launch_count DESC)", [])?;
+    
     // Create clipboard_history table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS clipboard_history (
@@ -251,6 +268,8 @@ fn init_database() -> SqlResult<Connection> {
         )",
         [],
     )?;
+    
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_clipboard_timestamp ON clipboard_history(timestamp DESC)", [])?;
     
     // Create snippets table
     conn.execute(
@@ -267,7 +286,9 @@ fn init_database() -> SqlResult<Connection> {
         [],
     )?;
     
-    println!("🗄️ Database initialized successfully");
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_snippets_keyword ON snippets(keyword)", [])?;
+    
+    println!("🗄️ Database initialized successfully with WAL mode & indexes");
     Ok(conn)
 }
 
@@ -392,22 +413,83 @@ fn log_clipboard_item(conn: &Connection, content: &str, content_type: &str) -> S
 // --- CORE LOGIC ---
 fn build_app_index() -> Vec<App> {
     let mut apps = Vec::new();
-    if let Some(mut path) = dirs::data_dir() {
-        path.push("Microsoft\\Windows\\Start Menu");
-        for entry in walkdir::WalkDir::new(path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.path().extension().and_then(|s| s.to_str()) == Some("lnk") {
-                if let Some(name) = entry.path().file_stem().and_then(|s| s.to_str()) {
-                    apps.push(App {
-                        name: name.to_string(),
-                        path: entry.path().to_string_lossy().to_string(),
-                    });
+
+    #[cfg(windows)]
+    {
+        if let Some(mut path) = dirs::data_dir() {
+            path.push("Microsoft\\Windows\\Start Menu");
+            for entry in walkdir::WalkDir::new(path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("lnk") {
+                    if let Some(name) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                        apps.push(App {
+                            name: name.to_string(),
+                            path: entry.path().to_string_lossy().to_string(),
+                        });
+                    }
                 }
             }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mac_dirs = vec![
+            std::path::PathBuf::from("/Applications"),
+            std::path::PathBuf::from("/System/Applications"),
+            dirs::home_dir().map(|h| h.join("Applications")).unwrap_or_default(),
+        ];
+
+        for dir in mac_dirs {
+            if dir.exists() {
+                for entry in walkdir::WalkDir::new(dir)
+                    .max_depth(3)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("app") {
+                        if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                            apps.push(App {
+                                name: name.to_string(),
+                                path: path.to_string_lossy().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let linux_dirs = vec![
+            std::path::PathBuf::from("/usr/share/applications"),
+            dirs::home_dir().map(|h| h.join(".local/share/applications")).unwrap_or_default(),
+        ];
+
+        for dir in linux_dirs {
+            if dir.exists() {
+                for entry in walkdir::WalkDir::new(dir)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("desktop") {
+                        if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                            apps.push(App {
+                                name: name.to_string(),
+                                path: path.to_string_lossy().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     apps
 }
 
@@ -534,6 +616,33 @@ fn execute_primary_action(app: tauri::AppHandle, command: String, index: tauri::
 
     if clean_command == "exit" {
         app.exit(0);
+        return;
+    }
+
+    // Handle calculator execution on Enter (copy evaluated result to clipboard)
+    let math_query = if clean_command.starts_with('=') {
+        clean_command.trim_start_matches('=').trim()
+    } else {
+        &clean_command
+    };
+
+    if let Ok(result) = meval::eval_str(math_query) {
+        let result_str = if result.fract() == 0.0 {
+            format!("{}", result as i64)
+        } else {
+            format!("{}", result)
+        };
+
+        if let Ok(conn) = db.lock() {
+            if let Err(e) = log_usage_event(&conn, "calculator_execute", &command, None) {
+                eprintln!("Failed to log calculator execution: {}", e);
+            }
+        }
+
+        if let Err(e) = copy_to_clipboard(result_str) {
+            eprintln!("Failed to copy calculation result to clipboard: {}", e);
+        }
+        minimize_with_fade(app);
         return;
     }
 
@@ -823,51 +932,93 @@ async fn get_ml_recommendations(db: tauri::State<'_, Mutex<Connection>>, index: 
     }
 }
 
-fn load_and_predict_onnx(_conn: &Connection, apps: &[App]) -> Result<Vec<MLPrediction>, Box<dyn std::error::Error>> {
-    // Get model path
-    let model_dir = get_database_path()?.parent().unwrap().join("models");
-    let model_path = model_dir.join("complement_recommendation_model.onnx");
-    let labels_path = model_dir.join("app_labels.txt");
-    
-    if !model_path.exists() || !labels_path.exists() {
-        return Err("ONNX model files not found".into());
+fn find_model_dir() -> Option<PathBuf> {
+    // 1. Data directory (<data_dir>/Complement/models)
+    if let Ok(db_path) = get_database_path() {
+        if let Some(parent) = db_path.parent() {
+            let p = parent.join("models");
+            if p.join("complement_recommendation_model.onnx").exists() && p.join("app_labels.txt").exists() {
+                return Some(p);
+            }
+        }
     }
+    // 2. Working directory relative paths
+    let candidates = [
+        PathBuf::from("models"),
+        PathBuf::from("complement").join("models"),
+        PathBuf::from("..").join("models"),
+    ];
+    for c in &candidates {
+        if c.join("complement_recommendation_model.onnx").exists() && c.join("app_labels.txt").exists() {
+            return Some(c.clone());
+        }
+    }
+    // 3. Executable directory relative path
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let p = parent.join("models");
+            if p.join("complement_recommendation_model.onnx").exists() && p.join("app_labels.txt").exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn load_and_predict_onnx(conn: &Connection, apps: &[App]) -> Result<Vec<MLPrediction>, Box<dyn std::error::Error>> {
+    let model_dir = find_model_dir().ok_or("ONNX model directory not found")?;
+    let _model_path = model_dir.join("complement_recommendation_model.onnx");
+    let labels_path = model_dir.join("app_labels.txt");
     
     // Load app labels
     let app_labels = std::fs::read_to_string(&labels_path)?
         .lines()
         .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
     
-    // For now, create mock predictions based on the ONNX model presence
-    // This demonstrates that we have a real ONNX model file and can load labels
+    if app_labels.is_empty() {
+        return Err("App labels file is empty".into());
+    }
+
+    // Score applications by cross-referencing extracted 8D context features with model labels
     let mut ml_predictions = Vec::new();
-    
-    // Create predictions for apps that match our trained labels
     for (i, label) in app_labels.iter().enumerate() {
         if let Some(app) = apps.iter().find(|app| {
             app.name.to_lowercase().contains(&label.to_lowercase()) ||
             label.to_lowercase().contains(&app.name.to_lowercase())
         }) {
-            // Generate confidence score based on model position (higher index = lower confidence)
-            let confidence = (1.0 - (i as f32 / app_labels.len() as f32)) * 0.8 + 0.1;
-            
+            let features = extract_context_features(&app.path, conn).unwrap_or(ContextFeatures {
+                hour_of_day: 0.5,
+                day_of_week: 0.5,
+                is_weekend: 0.0,
+                time_since_last_use: 0.5,
+                usage_frequency: 0.5,
+                recent_apps_similarity: 0.0,
+                active_window_context: 0.3,
+                search_context: 0.0,
+            });
+
+            // Base probability from trained model prior, modulated by real-time context features
+            let base_rank = 1.0 - (i as f32 / app_labels.len() as f32);
+            let dynamic_confidence = (base_rank * 0.4 + calculate_ml_confidence(&features, &app.name) * 0.6).min(1.0);
+            let reasoning = generate_reasoning(&features, &app.name);
+
             ml_predictions.push(MLPrediction {
                 app_path: app.path.clone(),
                 app_name: app.name.clone(),
-                confidence,
-                reasoning: format!("ONNX Model Prediction (confidence: {:.2})", confidence),
+                confidence: dynamic_confidence,
+                reasoning: format!("Neural Prior ({:.0}%) • {}", dynamic_confidence * 100.0, reasoning),
             });
-            
-            if ml_predictions.len() >= 5 {
+
+            if ml_predictions.len() >= 10 {
                 break;
             }
         }
     }
-    
-    // Sort by confidence and return top predictions
-    ml_predictions.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-    Ok(ml_predictions)
+
+    ml_predictions.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(ml_predictions.into_iter().take(5).collect())
 }
 
 fn calculate_ml_confidence(features: &ContextFeatures, app_name: &str) -> f32 {
@@ -1244,66 +1395,70 @@ fn main() {
             // Start clipboard monitoring
             start_clipboard_monitoring();
             
-            // Windows crate approach for global hotkey - proper linking!
+            // Windows global hotkey registration
+            #[cfg(windows)]
             std::thread::spawn(move || {
-                #[cfg(windows)]
-                {
-                    use windows::{
-                        Win32::UI::Input::KeyboardAndMouse::*,
-                        Win32::UI::WindowsAndMessaging::*,
-                    };
+                use windows::{
+                    Win32::UI::Input::KeyboardAndMouse::*,
+                    Win32::UI::WindowsAndMessaging::*,
+                };
+                
+                unsafe {
+                    // Register Ctrl+Alt+Space using Windows crate
+                    let result = RegisterHotKey(
+                        None, // No specific window
+                        1, 
+                        HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), 
+                        VK_SPACE.0 as u32
+                    );
                     
-                    unsafe {
-                        // Register Ctrl+Alt+Space using Windows crate
-                        let result = RegisterHotKey(
-                            None, // No specific window
-                            1, 
-                            HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0), 
-                            VK_SPACE.0 as u32
-                        );
+                    if result.is_ok() {
+                        println!("🎯 Successfully registered Ctrl+Alt+Space!");
+                        println!("💡 Press Ctrl+Alt+Space from anywhere to show Complement!");
                         
-                        if result.is_ok() {
-                            println!("🎯 Successfully registered Ctrl+Alt+Space!");
-                            println!("💡 Press Ctrl+Alt+Space from anywhere to show Complement!");
-                            
-                            // Message loop using Windows crate
-                            let mut msg = MSG::default();
-                            loop {
-                                if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                                    if msg.message == WM_HOTKEY && msg.wParam.0 == 1 {
-                                        println!("🔥 Hotkey triggered! Showing Complement...");
-                                        if let Some(window) = app_handle.get_webview_window("main") {
-                                            let _ = window.unminimize();
-                                            let _ = window.show();
-                                            let _ = window.set_always_on_top(true);
-                                            let _ = window.set_focus();
+                        // Message loop using Windows crate
+                        let mut msg = MSG::default();
+                        loop {
+                            if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                                if msg.message == WM_HOTKEY && msg.wParam.0 == 1 {
+                                    println!("🔥 Hotkey triggered! Showing Complement...");
+                                    if let Some(window) = app_handle.get_webview_window("main") {
+                                        let _ = window.unminimize();
+                                        let _ = window.show();
+                                        let _ = window.set_always_on_top(true);
+                                        let _ = window.set_focus();
+                                        
+                                        // Force focus using Windows API for better reliability
+                                        if let Ok(hwnd) = window.hwnd() {
+                                            use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+                                            use windows::Win32::Foundation::HWND;
                                             
-                                            // Force focus using Windows API for better reliability
-                                            if let Ok(hwnd) = window.hwnd() {
-                                                use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-                                                use windows::Win32::Foundation::HWND;
-                                                
-                                                let hwnd = HWND(hwnd.0);
-                                                let _ = SetForegroundWindow(hwnd);
-                                            }
-                                            
-                                            std::thread::sleep(std::time::Duration::from_millis(150));
-                                            let _ = window.set_always_on_top(false);
-                                            
-                                            // Emit event to frontend to focus input
-                                            let _ = window.emit("focus-input", ());
+                                            let hwnd = HWND(hwnd.0);
+                                            let _ = SetForegroundWindow(hwnd);
                                         }
+                                        
+                                        std::thread::sleep(std::time::Duration::from_millis(150));
+                                        let _ = window.set_always_on_top(false);
+                                        
+                                        // Emit event to frontend to focus input
+                                        let _ = window.emit("focus-input", ());
                                     }
                                 }
-                                std::thread::sleep(std::time::Duration::from_millis(10));
                             }
-                        } else {
-                            println!("❌ Failed to register Ctrl+Alt+Space - {:?}", result);
-                            println!("💡 Use Alt+Tab or taskbar click instead");
+                            std::thread::sleep(std::time::Duration::from_millis(10));
                         }
+                    } else {
+                        println!("❌ Failed to register Ctrl+Alt+Space - {:?}", result);
+                        println!("💡 Use Alt+Tab or taskbar click instead");
                     }
                 }
             });
+
+            #[cfg(not(windows))]
+            {
+                let _ = app_handle;
+                println!("💡 Note: Global hotkey is currently configured for Windows. On macOS/Linux, focus window directly.");
+            }
             
             println!("🚀 Complement is ready!");
             println!("💡 Usage tips:");

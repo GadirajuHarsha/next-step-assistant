@@ -58,6 +58,10 @@ let resultsContainerEl: HTMLElement | null;
 let containerEl: HTMLElement | null;
 let selectedIndex = 0;
 let currentResults: App[] = [];
+let currentDisplayType: 'apps' | 'clipboard' | 'snippets' | 'ml' | 'other' = 'other';
+let currentClipboardItems: ClipboardItem[] = [];
+let currentSnippetItems: Snippet[] = [];
+let currentMLItems: MLPrediction[] = [];
 
 // Reusable fade-out animation for minimize
 async function minimizeWithFade() {
@@ -106,7 +110,7 @@ function updateWindowSize() {
   const newWidth = 715;
 
   appWindow.setSize(new LogicalSize(newWidth, newHeight));
-  appWindow.setPosition(new LogicalPosition(window.innerWidth / 2 - newWidth / 2, window.innerHeight / 2 - newHeight / 2));
+  appWindow.center();
 }
 
 
@@ -485,12 +489,6 @@ function clearCommandBar() {
 
   updateWindowSize();
 }
-
-// Store current display type for Enter key handling
-let currentDisplayType: 'apps' | 'clipboard' | 'snippets' | 'ml' | 'other' = 'other';
-let currentClipboardItems: ClipboardItem[] = [];
-let currentSnippetItems: Snippet[] = [];
-let currentMLItems: MLPrediction[] = [];
 
 // This new function handles the Enter key
 async function handleEnterKey() {
